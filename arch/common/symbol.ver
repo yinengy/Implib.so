@@ -1,0 +1,5 @@
+$version {
+    global:
+        $names
+}$dependence;
+

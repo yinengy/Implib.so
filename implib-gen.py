@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 # Copyright 2017-2023 Yury Gribov
+# Copyright 2023 yinengy
 #
 # The MIT License (MIT)
 #
@@ -21,6 +22,28 @@ import configparser
 
 me = os.path.basename(__file__)
 root = os.path.dirname(__file__)
+
+class Func:
+  name: str  # original function name, e.g. lib
+  symbol: str  # function symbol, which may be mangled with version e.g. lib@GLIBC_2.3
+  name_with_version: str # function name manged with version e.g. lib_GLIBC_2_3
+  version_directive: str  # the version directive string in assembly e.g. GLIBC_2.3
+  visibility: str # .global or .weak
+
+  def __init__(self, name) -> None:
+    self.name = name
+    self.symbol = self.name + "_BASE"
+    self.name_with_version = name + "@"
+    self.version_directive = f".symver {self.symbol}, {self.name_with_version}"
+    self.visibility = ".global"
+
+  def add_version_directive(self, version, is_default) -> None:
+    self.symbol = self.name + "_" + version.replace(".", "_")
+    
+    # generate directive for symbol version
+    at_str = "@@" if is_default else "@"
+    self.name_with_version = self.name + at_str + version
+    self.version_directive = f".symver {self.symbol}, {self.name_with_version}"
 
 def warn(msg):
   """Emits a nicely-decorated warning."""
@@ -393,6 +416,7 @@ Examples:
   args = parser.parse_args()
 
   input_name = args.library
+  library_abspath = os.path.abspath(input_name)
   verbose = args.verbose
   dlopen_callback = args.dlopen_callback
   dlsym_callback = args.dlsym_callback
@@ -412,15 +436,15 @@ Examples:
   outdir = args.outdir
 
   if args.symbol_list is None:
-    funs = None
+    symbol_list = None
   else:
     with open(args.symbol_list, 'r') as f:
-      funs = []
+      symbol_list = []
       for line in re.split(r'\r?\n', f.read()):
         line = re.sub(r'#.*', '', line)
         line = line.strip()
         if line:
-          funs.append(line)
+          symbol_list.append(line)
 
   if args.library_load_name is not None:
     load_name = args.library_load_name
@@ -470,33 +494,41 @@ Examples:
 
   orig_funs = filter(lambda s: s['Type'] == 'FUNC', syms)
 
-  all_funs = set()
-  warn_versioned = False
+  funs = []
+  versions = {}
   for s in orig_funs:
-    if not s['Default']:
-      # TODO: support versions
-      if not warn_versioned:
-        warn(f"library {input_name} contains versioned symbols which are NYI")
-        warn_versioned = True
-      if verbose:
-        print(f"Skipping versioned symbol {s['Name']}")
-      continue
-    all_funs.add(s['Name'])
+    name = s['Name']
+    ver = s['Version']
 
-  if funs is None:
-    funs = sorted(list(all_funs))
-    if not funs and not quiet:
-      warn(f"no public functions were found in {input_name}")
-  else:
-    missing_funs = [name for name in funs if name not in all_funs]
+    # skip symbols if a symbol list is given by user
+    if symbol_list and name not in symbol_list:
+      continue
+
+    f = Func(name)
+    if ver:
+      f.add_version_directive(ver, s['Default'])
+
+      if ver in versions:
+        versions[ver].append(name)
+      else:
+        versions[ver] = [name]
+    if s['Bind'] == 'WEAK':
+      f.visibility = '.weak'
+    
+    funs.append(f)
+
+
+  if not funs:
+    warn(f"no public functions were found in {input_name}")
+  elif symbol_list:
+    missing_funs = [name for name in symbol_list if name not in [f.name for f in funs]]
     if missing_funs:
       warn("some user-specified functions are not present in library: " + ', '.join(missing_funs))
-    funs = [name for name in funs if name in all_funs]
 
   if verbose:
     print("Exported functions:")
     for i, fun in enumerate(funs):
-      print(f"  {i}: {fun}")
+      print(f"  {i}: {fun.name_with_version}")
 
   # Collect vtables
 
@@ -560,13 +592,45 @@ Examples:
     with open(target_dir + '/trampoline.S.tpl', 'r') as t:
       tramp_tpl = string.Template(t.read())
 
-    for i, name in enumerate(funs):
+    for i, func in enumerate(funs):
       tramp_text = tramp_tpl.substitute(
         lib_suffix=lib_suffix,
-        sym=args.symbol_prefix + name,
+        sym=func.symbol,
+        version_directive=func.version_directive,
+        name=func.name,
+        visibility=func.visibility,
         offset=i*ptr_size,
         number=i)
       f.write(tramp_text)
+
+  # Generate version script
+
+  version_file = f'{suffix}.ver'
+  with open(os.path.join(outdir, version_file), 'w') as f:
+    if not quiet:
+      print(f"Generating {version_file}...")
+    with open(os.path.join(root, 'arch/common/symbol.ver'), 'r') as t:
+      version_tpl = string.Template(t.read())
+    
+      names_str = ""
+      last_version = ""
+      for version in sorted(versions.keys()):
+        names_str = ";\n        ".join(versions[version])
+
+        # base version node should hide all other symbols
+        if not last_version:
+          names_str += ";\n    local:\n        *;"
+        else:
+          names_str += ";"
+
+        version_text = version_tpl.substitute(
+          names=names_str,
+          version=version,
+          dependence=last_version,
+        )
+        f.write(version_text)
+
+        last_version = version
 
   # Generate C code
 
@@ -576,7 +640,7 @@ Examples:
       print(f"Generating {init_file}...")
     with open(os.path.join(root, 'arch/common/init.c.tpl'), 'r') as t:
       if funs:
-        sym_names = ',\n  '.join(f'"{name}"' for name in funs) + ','
+        sym_names = ',\n  '.join(f'"{func.name}"' for func in funs) + ','
       else:
         sym_names = ''
       init_text = string.Template(t.read()).substitute(
@@ -588,7 +652,8 @@ Examples:
         has_dlsym_callback=int(bool(dlsym_callback)),
         no_dlopen=int(not dlopen),
         lazy_load=int(lazy_load),
-        sym_names=sym_names)
+        sym_names=sym_names,
+        library_abspath=library_abspath)
       f.write(init_text)
     if args.vtables:
       vtable_text = generate_vtables(cls_tables, cls_syms, cls_data)

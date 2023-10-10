@@ -1,5 +1,6 @@
 /*
  * Copyright 2018-2022 Yury Gribov
+ * Copyright 2023 yinengy
  *
  * The MIT License (MIT)
  *
@@ -54,10 +55,10 @@ static void *load_library() {
 
 #if HAS_DLOPEN_CALLBACK
   extern void *$dlopen_callback(const char *lib_name);
-  lib_handle = $dlopen_callback("$load_name");
+  lib_handle = $dlopen_callback("$library_abspath");
   CHECK(lib_handle, "failed to load library '$load_name' via callback '$dlopen_callback'");
 #else
-  lib_handle = dlopen("$load_name", RTLD_LAZY | RTLD_GLOBAL);
+  lib_handle = dlopen("$library_abspath", RTLD_LAZY | RTLD_LOCAL | RTLD_DEEPBIND);
   CHECK(lib_handle, "failed to load library '$load_name' via dlopen: %s", dlerror());
 #endif
 

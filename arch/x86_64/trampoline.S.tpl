@@ -1,5 +1,6 @@
 /*
  * Copyright 2018-2022 Yury Gribov
+ * Copyright 2023 yinengy
  *
  * The MIT License (MIT)
  *
@@ -7,12 +8,13 @@
  * found in the LICENSE.txt file.
  */
 
-  .globl $sym
+  $visibility $sym
   .p2align 4
   .type $sym, %function
 #ifndef IMPLIB_EXPORT_SHIMS
   .hidden $sym
 #endif
+  $version_directive
 $sym:
   .cfi_startproc
   .cfi_def_cfa_offset 8  // Return address

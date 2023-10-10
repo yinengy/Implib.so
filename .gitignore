@@ -17,3 +17,6 @@ tests/*/*.log
 
 # GDB
 .gdb_history
+
+# VSCode
+.vscode
