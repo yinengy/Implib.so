@@ -80,12 +80,12 @@ static void __attribute__((constructor)) load_lib() {
 #endif
 
 // TODO: convert to single 0-separated string
-const char *const _libpthread_so_0_sym_names[] = {
+const char *const sym_names[] = {
   $sym_names
   0
 };
 
-#define SYM_COUNT (sizeof(_libpthread_so_0_sym_names)/sizeof(_libpthread_so_0_sym_names[0]) - 1)
+#define SYM_COUNT (sizeof(sym_names)/sizeof(sym_names[0]) - 1)
 
 extern void *_${lib_suffix}_tramp_table[];
 
@@ -93,7 +93,7 @@ extern void *_${lib_suffix}_tramp_table[];
 void _${lib_suffix}_tramp_resolve(int i) {
   assert((unsigned)i < SYM_COUNT);
 
-  CHECK(!is_lib_loading, "library function '%s' called during library load", _libpthread_so_0_sym_names[i]);
+  CHECK(!is_lib_loading, "library function '%s' called during library load", sym_names[i]);
 
   void *h = 0;
 #if NO_DLOPEN
@@ -114,17 +114,17 @@ void _${lib_suffix}_tramp_resolve(int i) {
   }
 #else
   h = load_library();
-  CHECK(h, "failed to resolve symbol '%s', library failed to load", _libpthread_so_0_sym_names[i]);
+  CHECK(h, "failed to resolve symbol '%s', library failed to load", sym_names[i]);
 #endif
 
 #if HAS_DLSYM_CALLBACK
   extern void *$dlsym_callback(void *handle, const char *sym_name);
-  _${lib_suffix}_tramp_table[i] = $dlsym_callback(h, _libpthread_so_0_sym_names[i]);
-  CHECK(_${lib_suffix}_tramp_table[i], "failed to resolve symbol '%s' via callback $dlsym_callback", _libpthread_so_0_sym_names[i]);
+  _${lib_suffix}_tramp_table[i] = $dlsym_callback(h, sym_names[i]);
+  CHECK(_${lib_suffix}_tramp_table[i], "failed to resolve symbol '%s' via callback $dlsym_callback", sym_names[i]);
 #else
   // Dlsym is thread-safe so don't need to protect it.
-  _${lib_suffix}_tramp_table[i] = dlsym(h, _libpthread_so_0_sym_names[i]);
-  CHECK(_${lib_suffix}_tramp_table[i], "failed to resolve symbol '%s' via dlsym: %s", _libpthread_so_0_sym_names[i], dlerror());
+  _${lib_suffix}_tramp_table[i] = dlsym(h, sym_names[i]);
+  CHECK(_${lib_suffix}_tramp_table[i], "failed to resolve symbol '%s' via dlsym: %s", sym_names[i], dlerror());
 #endif
 }
 
