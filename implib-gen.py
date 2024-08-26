@@ -19,6 +19,7 @@ import subprocess
 import argparse
 import string
 import configparser
+import shutil
 
 me = os.path.basename(__file__)
 root = os.path.dirname(__file__)
@@ -364,6 +365,10 @@ Examples:
                       help="Print diagnostic info",
                       action='count',
                       default=0)
+  parser.add_argument('--vlc',
+                      metavar='VLC',
+                      help="Number of VLCs (for generate Shim for VLC)",
+                      default=0)
   parser.add_argument('--dlopen',
                       help="Emit dlopen call (default)",
                       dest='dlopen', action='store_true', default=True)
@@ -415,6 +420,7 @@ Examples:
 
   args = parser.parse_args()
 
+  num_vlc = int(args.vlc)
   input_name = args.library
   library_abspath = os.path.abspath(input_name)
   verbose = args.verbose
@@ -583,25 +589,72 @@ Examples:
   with open(os.path.join(outdir, tramp_file), 'w') as f:
     if not quiet:
       print(f"Generating {tramp_file}...")
-    with open(target_dir + '/table.S.tpl', 'r') as t:
-      table_text = string.Template(t.read()).substitute(
-        lib_suffix=lib_suffix,
-        table_size=ptr_size*(len(funs) + 1))
-    f.write(table_text)
+    
+    if num_vlc == 0:
+      with open(target_dir + '/table.S.tpl', 'r') as t:
+        table_text = string.Template(t.read()).substitute(
+          lib_suffix=lib_suffix,
+          table_size=ptr_size*(len(funs) + 1))
+      f.write(table_text)
 
-    with open(target_dir + '/trampoline.S.tpl', 'r') as t:
-      tramp_tpl = string.Template(t.read())
+      with open(target_dir + '/trampoline.S.tpl', 'r') as t:
+        tramp_tpl = string.Template(t.read())
+    
+      for i, func in enumerate(funs):
+        tramp_text = tramp_tpl.substitute(
+          lib_suffix=lib_suffix,
+          sym=func.symbol,
+          version_directive=func.version_directive,
+          name=func.name,
+          visibility=func.visibility,
+          offset=i*ptr_size,
+          number=i)
+        f.write(tramp_text)
+    else:
+        with open(target_dir + '/table.vlc.S.tpl', 'r') as t:
+          table_text = string.Template(t.read()).substitute(
+            lib_suffix=lib_suffix,
+            table_size=ptr_size*(len(funs) * (num_vlc + 1) + 1))
+          
+        f.write(table_text)
 
-    for i, func in enumerate(funs):
-      tramp_text = tramp_tpl.substitute(
-        lib_suffix=lib_suffix,
-        sym=func.symbol,
-        version_directive=func.version_directive,
-        name=func.name,
-        visibility=func.visibility,
-        offset=i*ptr_size,
-        number=i)
-      f.write(tramp_text)
+        with open(target_dir + '/trampoline.vlc.S.tpl', 'r') as t:
+          tramp_tpl = string.Template(t.read())
+
+        with open(target_dir + '/jumptable.start.vlc.S.tpl', 'r') as t:
+          jumptable_start_tpl = string.Template(t.read())
+        
+        with open(target_dir + '/jumptable.end.vlc.S.tpl', 'r') as t:
+          jumptable_end_tpl = string.Template(t.read())
+
+        for i, func in enumerate(funs):
+          tramp_text = tramp_tpl.substitute(
+            lib_suffix=lib_suffix,
+            sym=func.symbol,
+            version_directive=func.version_directive,
+            name=func.name,
+            visibility=func.visibility,
+            offset=i*ptr_size,
+            number=i)
+          f.write(tramp_text)
+
+          jumptable_start_text = []
+          jumptable_end_text = []
+          for vlc_id in range(num_vlc+1):  # VLC 0 + N VLCs
+            jumptable_start_text.append(jumptable_start_tpl.substitute(
+              vlc_id=vlc_id
+            ))
+
+            jumptable_end_text.append(jumptable_end_tpl.substitute(
+              vlc_id=vlc_id,
+              lib_suffix=lib_suffix,
+              offset=vlc_id * (len(funs)) * 8 + i * 8
+            ))
+
+          jumptable_text = "".join(jumptable_start_text) \
+                         + "".join(jumptable_end_text) \
+                        + "  .cfi_endproc\n\n"
+          f.write(jumptable_text)
 
   # Generate version script
 
@@ -614,10 +667,21 @@ Examples:
     
       names_str = ""
       last_version = ""
+
+      if num_vlc != 0:
+        # vlc need an additional api to reload symbols
+        # which should have base version
+        f.write("Base {\n\
+    global:\n\
+        reload_library_symbols;\n\
+};\n\n")
+        last_version = "Base"
+
       for version in sorted(versions.keys()):
         names_str = ";\n        ".join(versions[version])
 
         # base version node should hide all other symbols
+        # except when vlc is used
         if not last_version:
           names_str += ";\n    local:\n        *;"
         else:
@@ -658,6 +722,20 @@ Examples:
     if args.vtables:
       vtable_text = generate_vtables(cls_tables, cls_syms, cls_data)
       f.write(vtable_text)
+
+  # Generate VLC Callback (if VLC is used)
+  if num_vlc != 0:
+    vlc_callback_file = f'vlc_callback.c'
+    with open(os.path.join(outdir, vlc_callback_file), 'w') as f:
+      if not quiet:
+        print(f"Generating {vlc_callback_file}...")
+      with open(os.path.join(root, 'arch/common/vlc_callback.c.tpl'), 'r') as t:
+        vlc_callback_text = string.Template(t.read()).substitute(
+          lib_suffix=lib_suffix)
+        f.write(vlc_callback_text)
+
+    shutil.copyfile(os.path.join(root, 'arch/common/vlc_hashmap.c'), os.path.join(outdir, 'vlc_hashmap.c'))
+    shutil.copyfile(os.path.join(root, 'arch/common/vlc_hashmap.h'), os.path.join(outdir, 'vlc_hashmap.h'))
 
 if __name__ == '__main__':
   main()

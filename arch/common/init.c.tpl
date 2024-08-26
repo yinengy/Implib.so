@@ -17,6 +17,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include <unistd.h>
+#include <sys/types.h>
+
+#include "vlc_hashmap.h"
 
 // Sanity check for ARM to avoid puzzling runtime crashes
 #ifdef __arm__
@@ -46,6 +50,31 @@ static void *lib_handle;
 static int do_dlclose;
 static int is_lib_loading;
 
+// hashmap related functions
+struct vlc_info {
+  pid_t tid;
+  int vlc_id;
+} ;
+
+int vlc_info_compare(const void *a, const void *b, void *udata) {
+    const pid_t pid_a = ((struct vlc_info *) a)->tid;
+    const pid_t pid_b = ((struct vlc_info *) b)->tid;
+    if (pid_a > pid_b) {
+      return 1;
+    } else if (pid_a == pid_b) {
+      return 0;
+    } else {
+      return -1;
+    }
+}
+
+// tid itself is unique so can be used as a hash directly
+uint64_t vlc_info_hash(const void *item, uint64_t seed0, uint64_t seed1) {
+  return (uint64_t) ((struct vlc_info *) item)->tid;
+}
+
+struct hashmap *vlc_map;
+
 #if ! NO_DLOPEN
 static void *load_library() {
   if(lib_handle)
@@ -54,8 +83,8 @@ static void *load_library() {
   is_lib_loading = 1;
 
 #if HAS_DLOPEN_CALLBACK
-  extern void *$dlopen_callback(const char *lib_name);
-  lib_handle = $dlopen_callback("$library_abspath");
+  extern void *dlopen_callback(const char *lib_name, int symbol_offset, int vlc_id);
+  lib_handle = $dlopen_callback("$library_abspath", 0, 0);
 #else
   lib_handle = dlopen("$library_abspath", RTLD_LAZY | RTLD_LOCAL | RTLD_DEEPBIND);
   CHECK(lib_handle, "failed to load library '$load_name' via dlopen: %s", dlerror());
@@ -70,12 +99,16 @@ static void *load_library() {
 static void __attribute__((destructor)) unload_lib() {
   if(do_dlclose && lib_handle)
     dlclose(lib_handle);
+  hashmap_free(vlc_map);
 }
 #endif
 
 #if ! NO_DLOPEN && ! LAZY_LOAD
 static void __attribute__((constructor)) load_lib() {
   load_library();
+  // init hash map
+  vlc_map = hashmap_new(sizeof(struct vlc_info), 0, 0, 0, 
+                                     vlc_info_hash, vlc_info_compare, NULL, NULL);
 }
 #endif
 
@@ -88,6 +121,29 @@ const char *const sym_names[] = {
 #define SYM_COUNT (sizeof(sym_names)/sizeof(sym_names[0]) - 1)
 
 extern void *_${lib_suffix}_tramp_table[];
+
+void reload_library_symbols(int vlc_id) {
+  is_lib_loading = 1;
+  printf("reload symbols for vlc %d\n", vlc_id);
+  int symbol_offset = vlc_id * SYM_COUNT;
+  extern void *dlopen_callback(const char *lib_name, int symbol_offset, int vlc_id);
+  dlopen_callback("$library_abspath", symbol_offset, vlc_id);
+
+  // map thread id to vlc id
+  pid_t tid = gettid();
+
+  // this call is not thread safe
+  // so caller should ensure
+  // reload_library_symbols() is protect by lock
+  hashmap_set(vlc_map, &(struct vlc_info){tid, vlc_id});
+
+  is_lib_loading = 0;
+}
+
+int _${lib_suffix}_tramp_resolve_address(int i) {
+  const struct vlc_info *info = hashmap_get(vlc_map, &(struct vlc_info){.tid=gettid()});
+  return info->vlc_id;
+}
 
 // Can be sped up by manually parsing library symtab...
 void _${lib_suffix}_tramp_resolve(int i) {
