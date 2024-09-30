@@ -580,6 +580,12 @@ Examples:
         for typ, val in data:
           print("    " + str(val if typ != 'reloc' else val['Symbol\'s Name + Addend']))
 
+  # Sort funcs by the order by symbol-list
+  # This is required by VLCs
+  if symbol_list:
+    order_map = {name: index for index, name in enumerate(symbol_list)}
+    funs = sorted(funs, key=lambda func: order_map[func.name])
+
   # Generate assembly code
 
   suffix = os.path.basename(input_name)
